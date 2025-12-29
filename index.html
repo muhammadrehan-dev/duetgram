@@ -1,0 +1,1323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DUETgram - Student Portal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import {
+            getAuth,
+            createUserWithEmailAndPassword,
+            signInWithEmailAndPassword,
+            sendEmailVerification,
+            sendPasswordResetEmail,
+            onAuthStateChanged,
+            signOut,
+            updatePassword
+        } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+        import { 
+            getDatabase, 
+            ref, 
+            set,
+            get,
+            update,
+            onValue,
+            push,
+            remove
+        } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js';
+
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+};
+
+export default firebaseConfig;
+
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const database = getDatabase(app);
+
+        let currentUser = null;
+        let currentView = 'login';
+        let currentTab = 'profile';
+        let allUsers = {};
+        let currentUserData = {};
+
+        const validateEmail = (email) => {
+            const domain = '@students.duet.edu.pk';
+            return email.toLowerCase().endsWith(domain);
+        };
+
+        const extractName = (email) => {
+            const name = email.split('@')[0];
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        };
+
+        const generatePassword = () => {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%';
+            let pass = '';
+            for (let i = 0; i < 12; i++) {
+                pass += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return pass;
+        };
+
+        const formatDate = (dateString) => {
+            const date = new Date(dateString);
+            const options = { year: 'numeric', month: 'short', day: 'numeric' };
+            return date.toLocaleDateString('en-US', options);
+        };
+
+        const showError = (message) => {
+            document.querySelectorAll('[id^="errorMessage"]').forEach(div => {
+                div.textContent = message;
+                div.classList.remove('hidden');
+            });
+            document.querySelectorAll('[id^="successMessage"]').forEach(div => {
+                div.classList.add('hidden');
+            });
+        };
+
+        const showSuccess = (message) => {
+            document.querySelectorAll('[id^="successMessage"]').forEach(div => {
+                div.innerHTML = message;
+                div.classList.remove('hidden');
+            });
+            document.querySelectorAll('[id^="errorMessage"]').forEach(div => {
+                div.classList.add('hidden');
+            });
+        };
+
+        const clearMessages = () => {
+            document.querySelectorAll('[id^="errorMessage"]').forEach(div => {
+                div.classList.add('hidden');
+            });
+            document.querySelectorAll('[id^="successMessage"]').forEach(div => {
+                div.classList.add('hidden');
+            });
+        };
+
+        const renderAuthScreen = () => {
+            document.getElementById('authScreen').classList.remove('hidden');
+            document.getElementById('dashboardScreen').classList.add('hidden');
+            document.getElementById('verificationScreen').classList.add('hidden');
+        };
+
+        const renderVerificationScreen = () => {
+            document.getElementById('authScreen').classList.add('hidden');
+            document.getElementById('dashboardScreen').classList.add('hidden');
+            document.getElementById('verificationScreen').classList.remove('hidden');
+        };
+
+        const loadAllUsers = () => {
+            const usersRef = ref(database, 'users');
+            onValue(usersRef, (snapshot) => {
+                allUsers = {};
+                if (snapshot.exists()) {
+                    allUsers = snapshot.val();
+                }
+                if (currentTab === 'discover') {
+                    renderDiscoverTab();
+                }
+                updateFollowCounts();
+            });
+        };
+
+        const updateFollowCounts = async () => {
+            if (!currentUser) return;
+            
+            const followingRef = ref(database, `following/${currentUser.uid}`);
+            const followersRef = ref(database, `followers/${currentUser.uid}`);
+            
+            const [followingSnap, followersSnap] = await Promise.all([
+                get(followingRef),
+                get(followersRef)
+            ]);
+            
+            const followingCount = followingSnap.exists() ? Object.keys(followingSnap.val()).length : 0;
+            const followersCount = followersSnap.exists() ? Object.keys(followersSnap.val()).length : 0;
+            
+            document.getElementById('followingCount').textContent = followingCount;
+            document.getElementById('followersCount').textContent = followersCount;
+        };
+
+        const isFollowing = async (targetUserId) => {
+            if (!currentUser) return false;
+            const followingRef = ref(database, `following/${currentUser.uid}/${targetUserId}`);
+            const snapshot = await get(followingRef);
+            return snapshot.exists();
+        };
+
+        const followUser = async (targetUserId) => {
+            if (!currentUser || currentUser.uid === targetUserId) return;
+            
+            try {
+                // Add to current user's following list
+                await set(ref(database, `following/${currentUser.uid}/${targetUserId}`), {
+                    timestamp: new Date().toISOString()
+                });
+                
+                // Add to target user's followers list
+                await set(ref(database, `followers/${targetUserId}/${currentUser.uid}`), {
+                    timestamp: new Date().toISOString()
+                });
+                
+                renderDiscoverTab();
+                updateFollowCounts();
+            } catch (err) {
+                showError('Error following user: ' + err.message);
+            }
+        };
+
+        const unfollowUser = async (targetUserId) => {
+            if (!currentUser || currentUser.uid === targetUserId) return;
+            
+            try {
+                // Remove from current user's following list
+                await remove(ref(database, `following/${currentUser.uid}/${targetUserId}`));
+                
+                // Remove from target user's followers list
+                await remove(ref(database, `followers/${targetUserId}/${currentUser.uid}`));
+                
+                renderDiscoverTab();
+                updateFollowCounts();
+            } catch (err) {
+                showError('Error unfollowing user: ' + err.message);
+            }
+        };
+
+        const renderDiscoverTab = async () => {
+            const container = document.getElementById('discoverContainer');
+            container.innerHTML = '';
+            
+            const usersList = Object.entries(allUsers)
+                .filter(([uid]) => uid !== currentUser.uid)
+                .sort((a, b) => new Date(b[1].createdAt) - new Date(a[1].createdAt));
+            
+            if (usersList.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center py-12 text-gray-500">
+                        <svg class="w-16 h-16 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                        </svg>
+                        <p class="text-lg font-medium">No other students yet</p>
+                        <p class="text-sm">Be the first to invite others!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            for (const [uid, userData] of usersList) {
+                if (!userData || !userData.name) continue;
+                const following = await isFollowing(uid);
+                const initial = userData.name.charAt(0).toUpperCase();
+                
+                const userCard = document.createElement('div');
+                userCard.className = 'flex items-center justify-between p-4 hover:bg-gray-50 transition-colors border-b border-gray-100';
+                userCard.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <div class="w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white font-bold">
+                            ${initial}
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900">${userData.name}</p>
+                            <p class="text-xs text-gray-500">${userData.email}</p>
+                            <p class="text-xs text-gray-400 mt-1">Joined ${formatDate(userData.createdAt)}</p>
+                        </div>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button
+                            class="follow-btn px-4 py-1.5 rounded-lg font-semibold text-sm transition-all ${
+                                following
+                                    ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                    : 'bg-gradient-to-r from-purple-500 to-pink-500 text-white hover:from-purple-600 hover:to-pink-600'
+                            }"
+                            data-uid="${uid}"
+                            data-following="${following}"
+                        >
+                            ${following ? 'Following' : 'Follow'}
+                        </button>
+                        <button
+                            class="message-btn px-4 py-1.5 rounded-lg font-semibold text-sm bg-blue-500 text-white hover:bg-blue-600 transition-all"
+                            data-uid="${uid}"
+                        >
+                            Message
+                        </button>
+                    </div>
+                `;
+
+                const followBtn = userCard.querySelector('.follow-btn');
+                followBtn.addEventListener('click', async (e) => {
+                    const targetUid = e.target.dataset.uid;
+                    const isCurrentlyFollowing = e.target.dataset.following === 'true';
+
+                    if (isCurrentlyFollowing) {
+                        await unfollowUser(targetUid);
+                    } else {
+                        await followUser(targetUid);
+                    }
+                });
+
+                const messageBtn = userCard.querySelector('.message-btn');
+                messageBtn.addEventListener('click', () => {
+                    if (userData) {
+                        openChat(uid, userData);
+                    }
+                });
+
+                container.appendChild(userCard);
+            }
+        };
+
+        const renderFollowersTab = async () => {
+            const container = document.getElementById('followersContainer');
+            container.innerHTML = '';
+            
+            const followersRef = ref(database, `followers/${currentUser.uid}`);
+            const snapshot = await get(followersRef);
+            
+            if (!snapshot.exists()) {
+                container.innerHTML = `
+                    <div class="text-center py-12 text-gray-500">
+                        <p class="text-lg font-medium">No followers yet</p>
+                        <p class="text-sm">Share your profile to get followers!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const followers = snapshot.val();
+            for (const [uid, data] of Object.entries(followers)) {
+                const userData = allUsers[uid];
+                if (!userData || !userData.name) continue;
+
+                const initial = userData.name.charAt(0).toUpperCase();
+                const following = await isFollowing(uid);
+                
+                const userCard = document.createElement('div');
+                userCard.className = 'flex items-center justify-between p-4 hover:bg-gray-50 transition-colors border-b border-gray-100';
+                userCard.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <div class="w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white font-bold">
+                            ${initial}
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900">${userData.name}</p>
+                            <p class="text-xs text-gray-500">${userData.email}</p>
+                        </div>
+                    </div>
+                    <button
+                        class="follow-btn px-6 py-1.5 rounded-lg font-semibold text-sm transition-all ${
+                            following 
+                                ? 'bg-gray-200 text-gray-700 hover:bg-gray-300' 
+                                : 'bg-gradient-to-r from-purple-500 to-pink-500 text-white hover:from-purple-600 hover:to-pink-600'
+                        }"
+                        data-uid="${uid}"
+                        data-following="${following}"
+                    >
+                        ${following ? 'Following' : 'Follow Back'}
+                    </button>
+                `;
+                
+                const followBtn = userCard.querySelector('.follow-btn');
+                followBtn.addEventListener('click', async (e) => {
+                    const targetUid = e.target.dataset.uid;
+                    const isCurrentlyFollowing = e.target.dataset.following === 'true';
+                    
+                    if (isCurrentlyFollowing) {
+                        await unfollowUser(targetUid);
+                    } else {
+                        await followUser(targetUid);
+                    }
+                    renderFollowersTab();
+                });
+                
+                container.appendChild(userCard);
+            }
+        };
+
+        const renderFollowingTab = async () => {
+            const container = document.getElementById('followingContainer');
+            container.innerHTML = '';
+            
+            const followingRef = ref(database, `following/${currentUser.uid}`);
+            const snapshot = await get(followingRef);
+            
+            if (!snapshot.exists()) {
+                container.innerHTML = `
+                    <div class="text-center py-12 text-gray-500">
+                        <p class="text-lg font-medium">Not following anyone yet</p>
+                        <p class="text-sm">Discover students to follow!</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            const following = snapshot.val();
+            for (const [uid, data] of Object.entries(following)) {
+                const userData = allUsers[uid];
+                if (!userData || !userData.name) continue;
+
+                const initial = userData.name.charAt(0).toUpperCase();
+                
+                const userCard = document.createElement('div');
+                userCard.className = 'flex items-center justify-between p-4 hover:bg-gray-50 transition-colors border-b border-gray-100';
+                userCard.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        <div class="w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white font-bold">
+                            ${initial}
+                        </div>
+                        <div>
+                            <p class="font-semibold text-gray-900">${userData.name}</p>
+                            <p class="text-xs text-gray-500">${userData.email}</p>
+                        </div>
+                    </div>
+                    <button
+                        class="unfollow-btn px-6 py-1.5 bg-gray-200 text-gray-700 hover:bg-gray-300 rounded-lg font-semibold text-sm transition-all"
+                        data-uid="${uid}"
+                    >
+                        Following
+                    </button>
+                `;
+                
+                const unfollowBtn = userCard.querySelector('.unfollow-btn');
+                unfollowBtn.addEventListener('click', async (e) => {
+                    const targetUid = e.target.dataset.uid;
+                    await unfollowUser(targetUid);
+                    renderFollowingTab();
+                });
+                
+                container.appendChild(userCard);
+            }
+        };
+
+        const switchDashboardTab = (tab) => {
+            currentTab = tab;
+
+            // Hide all tabs
+            document.getElementById('profileTab').classList.add('hidden');
+            document.getElementById('discoverTab').classList.add('hidden');
+            document.getElementById('followersTab').classList.add('hidden');
+            document.getElementById('followingTab').classList.add('hidden');
+            document.getElementById('messagesTab').classList.add('hidden');
+
+            // Update tab buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('border-b-2', 'border-gray-900', 'font-semibold');
+                btn.classList.add('text-gray-500');
+            });
+
+            // Show selected tab
+            if (tab === 'profile') {
+                document.getElementById('profileTab').classList.remove('hidden');
+                document.getElementById('profileTabBtn').classList.add('border-b-2', 'border-gray-900', 'font-semibold');
+                document.getElementById('profileTabBtn').classList.remove('text-gray-500');
+            } else if (tab === 'discover') {
+                document.getElementById('discoverTab').classList.remove('hidden');
+                document.getElementById('discoverTabBtn').classList.add('border-b-2', 'border-gray-900', 'font-semibold');
+                document.getElementById('discoverTabBtn').classList.remove('text-gray-500');
+                renderDiscoverTab();
+            } else if (tab === 'followers') {
+                document.getElementById('followersTab').classList.remove('hidden');
+                document.getElementById('followersTabBtn').classList.add('border-b-2', 'border-gray-900', 'font-semibold');
+                document.getElementById('followersTabBtn').classList.remove('text-gray-500');
+                renderFollowersTab();
+            } else if (tab === 'following') {
+                document.getElementById('followingTab').classList.remove('hidden');
+                document.getElementById('followingTabBtn').classList.add('border-b-2', 'border-gray-900', 'font-semibold');
+                document.getElementById('followingTabBtn').classList.remove('text-gray-500');
+                renderFollowingTab();
+            } else if (tab === 'messages') {
+                document.getElementById('messagesTab').classList.remove('hidden');
+                document.getElementById('messagesTabBtn').classList.add('border-b-2', 'border-gray-900', 'font-semibold');
+                document.getElementById('messagesTabBtn').classList.remove('text-gray-500');
+                renderMessagesTab();
+            }
+        };
+
+        const renderDashboard = async (forcePasswordChange = false) => {
+            document.getElementById('authScreen').classList.add('hidden');
+            document.getElementById('verificationScreen').classList.add('hidden');
+            document.getElementById('dashboardScreen').classList.remove('hidden');
+            
+            const name = extractName(currentUser.email);
+            document.getElementById('userName').textContent = name;
+            document.getElementById('userEmail').textContent = currentUser.email;
+            document.getElementById('userInitial').textContent = name.charAt(0).toUpperCase();
+            
+            const userRef = ref(database, 'users/' + currentUser.uid);
+            const snapshot = await get(userRef);
+            
+            if (snapshot.exists()) {
+                currentUserData = snapshot.val();
+                document.getElementById('joinDate').textContent = formatDate(currentUserData.createdAt);
+                
+                if (currentUserData.needsPasswordChange || forcePasswordChange) {
+                    document.getElementById('changePasswordSection').classList.remove('hidden');
+                    document.getElementById('togglePasswordBtn').classList.add('hidden');
+                    document.getElementById('normalDashboard').classList.add('hidden');
+                    document.getElementById('forcePasswordChange').classList.remove('hidden');
+                    showSuccess('Please create a new password for your account.');
+                } else {
+                    document.getElementById('changePasswordSection').classList.add('hidden');
+                    document.getElementById('togglePasswordBtn').classList.remove('hidden');
+                    document.getElementById('normalDashboard').classList.remove('hidden');
+                    document.getElementById('forcePasswordChange').classList.add('hidden');
+                }
+            }
+            
+            loadAllUsers();
+            updateFollowCounts();
+            switchDashboardTab('profile');
+            clearMessages();
+        };
+
+        const handleRegister = async () => {
+            clearMessages();
+            const email = document.getElementById('registerEmail').value;
+
+            if (!validateEmail(email)) {
+                showError('Only @students.duet.edu.pk emails are allowed');
+                return;
+            }
+
+            try {
+                const tempPassword = generatePassword();
+                const userCredential = await createUserWithEmailAndPassword(auth, email, tempPassword);
+
+                await sendEmailVerification(userCredential.user);
+
+                const name = extractName(email);
+                await set(ref(database, 'users/' + userCredential.user.uid), {
+                    name: name,
+                    email: email,
+                    emailVerified: false,
+                    needsPasswordChange: true,
+                    createdAt: new Date().toISOString()
+                });
+
+                document.getElementById('registerEmail').value = '';
+                document.getElementById('verificationEmail').textContent = email;
+                renderVerificationScreen();
+
+            } catch (err) {
+                if (err.code === 'auth/email-already-in-use') {
+                    showError('This email is already registered. Please login instead.');
+                } else {
+                    showError(err.message);
+                }
+            }
+        };
+
+        const checkVerification = async () => {
+            if (!currentUser) return;
+
+            try {
+                await currentUser.reload();
+                
+                if (currentUser.emailVerified) {
+                    await update(ref(database, 'users/' + currentUser.uid), {
+                        emailVerified: true
+                    });
+                    
+                    renderDashboard(true);
+                } else {
+                    showError('Email not verified yet. Please check your inbox and click the verification link.');
+                }
+            } catch (err) {
+                showError('Error checking verification: ' + err.message);
+            }
+        };
+
+        const handleLogin = async () => {
+            clearMessages();
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+
+            if (!validateEmail(email)) {
+                showError('Only @students.duet.edu.pk emails are allowed');
+                return;
+            }
+
+            try {
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                
+                if (!userCredential.user.emailVerified) {
+                    document.getElementById('verificationEmail').textContent = email;
+                    renderVerificationScreen();
+                    return;
+                }
+                
+                document.getElementById('loginEmail').value = '';
+                document.getElementById('loginPassword').value = '';
+            } catch (err) {
+                if (err.code === 'auth/invalid-credential') {
+                    showError('Invalid email or password');
+                } else {
+                    showError(err.message);
+                }
+            }
+        };
+
+        const handleForgotPassword = async () => {
+            clearMessages();
+            const email = document.getElementById('loginEmail').value;
+
+            if (!email) {
+                showError('Please enter your email address first');
+                return;
+            }
+
+            if (!validateEmail(email)) {
+                showError('Only @students.duet.edu.pk emails are allowed');
+                return;
+            }
+
+            try {
+                try {
+                    await signInWithEmailAndPassword(auth, email, 'dummy-password-check-123');
+                } catch (signInErr) {
+                    if (signInErr.code === 'auth/user-not-found') {
+                        showError('No account found with this email address');
+                        return;
+                    }
+                }
+
+                await sendPasswordResetEmail(auth, email);
+
+                showSuccess(`
+                    <strong>Password Reset Email Sent!</strong><br><br>
+                    Check your email (${email}) for a password reset link.<br>
+                    Click the link to verify and reset your password.<br><br>
+                    <small class="text-blue-600">If you don't see the email, check your spam folder.</small>
+                `);
+
+            } catch (err) {
+                showError(err.message);
+            }
+        };
+
+        const handlePasswordChange = async () => {
+            clearMessages();
+            const newPassword = document.getElementById('newPassword').value;
+            const confirmPassword = document.getElementById('confirmPassword').value;
+
+            if (newPassword.length < 6) {
+                showError('Password must be at least 6 characters');
+                return;
+            }
+
+            if (newPassword !== confirmPassword) {
+                showError('Passwords do not match');
+                return;
+            }
+
+            try {
+                await updatePassword(currentUser, newPassword);
+                
+                await update(ref(database, 'users/' + currentUser.uid), {
+                    needsPasswordChange: false,
+                    passwordChangedAt: new Date().toISOString()
+                });
+                
+                showSuccess('Password created successfully! Welcome to DUETgram.');
+                document.getElementById('newPassword').value = '';
+                document.getElementById('confirmPassword').value = '';
+                
+                setTimeout(() => {
+                    renderDashboard(false);
+                }, 2000);
+            } catch (err) {
+                if (err.code === 'auth/requires-recent-login') {
+                    showError('Session expired. Please log out and log in again.');
+                } else {
+                    showError(err.message);
+                }
+            }
+        };
+
+        const handleLogout = async () => {
+            try {
+                await signOut(auth);
+            } catch (err) {
+                showError(err.message);
+            }
+        };
+
+        const switchView = (view) => {
+            currentView = view;
+            clearMessages();
+            
+            if (view === 'login') {
+                document.getElementById('loginSection').classList.remove('hidden');
+                document.getElementById('registerSection').classList.add('hidden');
+            } else {
+                document.getElementById('loginSection').classList.add('hidden');
+                document.getElementById('registerSection').classList.remove('hidden');
+            }
+        };
+
+        const togglePasswordChange = () => {
+            const section = document.getElementById('changePasswordSection');
+            if (section.classList.contains('hidden')) {
+                section.classList.remove('hidden');
+                document.getElementById('togglePasswordBtn').textContent = '← Back';
+            } else {
+                section.classList.add('hidden');
+                document.getElementById('togglePasswordBtn').textContent = 'Change Password';
+                clearMessages();
+            }
+        };
+
+        const resendVerification = async () => {
+            if (!currentUser) return;
+
+            try {
+                await sendEmailVerification(currentUser);
+                showSuccess('Verification email sent! Please check your inbox.');
+            } catch (err) {
+                showError('Error sending verification email: ' + err.message);
+            }
+        };
+
+        const renderMessagesTab = async () => {
+            const container = document.getElementById('messagesContainer');
+            container.innerHTML = `
+                <div id="conversationsList"></div>
+                <div id="chatView" class="hidden"></div>
+            `;
+            await loadConversations();
+        };
+
+        const loadConversations = async () => {
+            if (!currentUser) return;
+
+            const conversationsRef = ref(database, `conversations/${currentUser.uid}`);
+            const snapshot = await get(conversationsRef);
+
+            const conversationsList = document.getElementById('conversationsList');
+            conversationsList.innerHTML = '';
+
+            if (!snapshot.exists()) {
+                conversationsList.innerHTML = `
+                    <div class="text-center py-12 text-gray-500">
+                        <svg class="w-16 h-16 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                        </svg>
+                        <p class="text-lg font-medium">No conversations yet</p>
+                        <p class="text-sm">Start chatting with your DUET community!</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const conversations = snapshot.val();
+            const conversationItems = [];
+
+            for (const [otherUserId, conversationData] of Object.entries(conversations)) {
+                const otherUserData = allUsers[otherUserId];
+                if (!otherUserData || !otherUserData.name) continue;
+
+                const lastMessage = conversationData.lastMessage || '';
+                const timestamp = conversationData.lastMessageTime ? new Date(conversationData.lastMessageTime) : new Date();
+                const timeString = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+                conversationItems.push({
+                    otherUserId,
+                    otherUserData,
+                    lastMessage,
+                    timestamp,
+                    timeString
+                });
+            }
+
+            conversationItems.sort((a, b) => b.timestamp - a.timestamp);
+
+            for (const item of conversationItems) {
+                const conversationDiv = document.createElement('div');
+                conversationDiv.className = 'flex items-center p-4 hover:bg-gray-50 transition-colors border-b border-gray-100 cursor-pointer';
+                conversationDiv.innerHTML = `
+                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white font-bold mr-3">
+                        ${item.otherUserData.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div class="flex-1">
+                        <p class="font-semibold text-gray-900">${item.otherUserData.name}</p>
+                        <p class="text-sm text-gray-500 truncate">${item.lastMessage || 'No messages yet'}</p>
+                    </div>
+                    <p class="text-xs text-gray-400">${item.timeString}</p>
+                `;
+
+                conversationDiv.addEventListener('click', () => openChat(item.otherUserId, item.otherUserData));
+                conversationsList.appendChild(conversationDiv);
+            }
+        };
+
+        const openChat = async (otherUserId, otherUserData) => {
+            if (!otherUserData || !otherUserData.name) return;
+
+            document.getElementById('conversationsList').classList.add('hidden');
+            document.getElementById('chatView').classList.remove('hidden');
+
+            const chatView = document.getElementById('chatView');
+            chatView.dataset.otherUserId = otherUserId;
+
+            document.getElementById('chatUserInitial').textContent = otherUserData.name.charAt(0).toUpperCase();
+            document.getElementById('chatUserName').textContent = otherUserData.name;
+
+            await loadMessages(otherUserId);
+
+            // Listen for new messages
+            const messagesRef = ref(database, `messages/${getConversationId(currentUser.uid, otherUserId)}`);
+            onValue(messagesRef, (snapshot) => {
+                if (snapshot.exists()) {
+                    renderMessages(snapshot.val());
+                }
+            });
+        };
+
+        const loadMessages = async (otherUserId) => {
+            const conversationId = getConversationId(currentUser.uid, otherUserId);
+            const messagesRef = ref(database, `messages/${conversationId}`);
+            const snapshot = await get(messagesRef);
+
+            if (snapshot.exists()) {
+                renderMessages(snapshot.val());
+            } else {
+                document.getElementById('messagesList').innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <p class="text-sm">No messages yet. Start the conversation!</p>
+                    </div>
+                `;
+            }
+        };
+
+        const renderMessages = (messages) => {
+            const messagesList = document.getElementById('messagesList');
+            messagesList.innerHTML = '';
+
+            const sortedMessages = Object.values(messages).sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+            for (const message of sortedMessages) {
+                const messageDiv = document.createElement('div');
+                const isOwnMessage = message.senderId === currentUser.uid;
+
+                messageDiv.className = `flex ${isOwnMessage ? 'justify-end' : 'justify-start'}`;
+                messageDiv.innerHTML = `
+                    <div class="max-w-xs px-4 py-2 rounded-lg ${
+                        isOwnMessage
+                            ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
+                            : 'bg-gray-200 text-gray-900'
+                    }">
+                        <p class="text-sm">${message.text}</p>
+                        <p class="text-xs ${isOwnMessage ? 'text-purple-100' : 'text-gray-500'} mt-1">
+                            ${new Date(message.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                    </div>
+                `;
+
+                messagesList.appendChild(messageDiv);
+            }
+
+            messagesList.scrollTop = messagesList.scrollHeight;
+        };
+
+        const sendMessage = async () => {
+            const messageInput = document.getElementById('messageInput');
+            const text = messageInput.value.trim();
+
+            if (!text) return;
+
+            const chatView = document.getElementById('chatView');
+            const otherUserId = chatView.dataset.otherUserId;
+
+            if (!otherUserId) return;
+
+            const conversationId = getConversationId(currentUser.uid, otherUserId);
+            const messageData = {
+                text,
+                senderId: currentUser.uid,
+                timestamp: new Date().toISOString()
+            };
+
+            try {
+                // Add message to messages collection
+                const newMessageRef = push(ref(database, `messages/${conversationId}`));
+                await set(newMessageRef, messageData);
+
+                // Update conversation metadata for both users
+                const conversationUpdate = {
+                    lastMessage: text,
+                    lastMessageTime: new Date().toISOString(),
+                    participants: [currentUser.uid, otherUserId]
+                };
+
+                await set(ref(database, `conversations/${currentUser.uid}/${otherUserId}`), conversationUpdate);
+                await set(ref(database, `conversations/${otherUserId}/${currentUser.uid}`), conversationUpdate);
+
+                messageInput.value = '';
+                await loadConversations(); // Refresh conversations list
+            } catch (err) {
+                showError('Error sending message: ' + err.message);
+            }
+        };
+
+        const getConversationId = (userId1, userId2) => {
+            return [userId1, userId2].sort().join('_');
+        };
+
+        const backToConversations = () => {
+            document.getElementById('chatView').classList.add('hidden');
+            document.getElementById('conversationsList').classList.remove('hidden');
+        };
+
+        onAuthStateChanged(auth, async (user) => {
+            currentUser = user;
+            if (user) {
+                if (!user.emailVerified) {
+                    renderVerificationScreen();
+                } else {
+                    renderDashboard();
+                }
+            } else {
+                renderAuthScreen();
+            }
+        });
+
+        window.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('switchToRegister').addEventListener('click', () => switchView('register'));
+            document.getElementById('switchToLogin').addEventListener('click', () => switchView('login'));
+            document.getElementById('loginBtn').addEventListener('click', handleLogin);
+            document.getElementById('registerBtn').addEventListener('click', handleRegister);
+            document.getElementById('forgotPasswordBtn').addEventListener('click', handleForgotPassword);
+            document.getElementById('logoutBtnDash').addEventListener('click', handleLogout);
+            document.getElementById('logoutBtnVerify').addEventListener('click', handleLogout);
+            document.getElementById('togglePasswordBtn').addEventListener('click', togglePasswordChange);
+            document.getElementById('changePasswordBtn').addEventListener('click', handlePasswordChange);
+            document.getElementById('checkVerificationBtn').addEventListener('click', checkVerification);
+            document.getElementById('resendVerificationBtn').addEventListener('click', resendVerification);
+
+            // Tab navigation
+            document.getElementById('profileTabBtn').addEventListener('click', () => switchDashboardTab('profile'));
+            document.getElementById('discoverTabBtn').addEventListener('click', () => switchDashboardTab('discover'));
+            document.getElementById('followersTabBtn').addEventListener('click', () => switchDashboardTab('followers'));
+            document.getElementById('followingTabBtn').addEventListener('click', () => switchDashboardTab('following'));
+            document.getElementById('messagesTabBtn').addEventListener('click', () => switchDashboardTab('messages'));
+
+            // Messaging event listeners
+            document.getElementById('sendMessageBtn').addEventListener('click', sendMessage);
+            document.getElementById('backToConversationsBtn').addEventListener('click', backToConversations);
+            document.getElementById('messageInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') sendMessage();
+            });
+
+            document.getElementById('loginEmail').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleLogin();
+            });
+            document.getElementById('loginPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleLogin();
+            });
+            document.getElementById('registerEmail').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handleRegister();
+            });
+            document.getElementById('newPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') document.getElementById('confirmPassword').focus();
+            });
+            document.getElementById('confirmPassword').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') handlePasswordChange();
+            });
+        });
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Playfair+Display:wght@700;900&display=swap');
+        
+        body {
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        }
+        
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+            animation: gradientShift 15s ease infinite;
+            background-size: 200% 200%;
+        }
+        
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        
+        .logo-gradient {
+            background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-family: 'Playfair Display', serif;
+            font-weight: 900;
+            letter-spacing: -1px;
+        }
+        
+        .btn-gradient {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+        
+        .btn-gradient:hover {
+            background: linear-gradient(90deg, #5568d3 0%, #6a3f8f 100%);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+            transform: translateY(-2px);
+        }
+        
+        .tab-btn {
+            transition: all 0.3s ease;
+        }
+        
+        .tab-btn:hover {
+            color: #000;
+        }
+    </style>
+</head>
+<body class="min-h-screen gradient-bg flex items-center justify-center p-4">
+    <!-- Loading Screen -->
+    <div id="loadingScreen" class="flex items-center justify-center min-h-screen">
+        <div class="text-xl text-white font-medium">Loading...</div>
+    </div>
+
+    <!-- Auth Screen -->
+    <div id="authScreen" class="hidden w-full max-w-sm">
+        <!-- Login Section -->
+        <div id="loginSection" class="space-y-3">
+            <div class="bg-white rounded-lg shadow-2xl p-10">
+                <div class="text-center mb-8">
+                    <h1 class="text-5xl font-bold logo-gradient mb-1">DUETgram</h1>
+                </div>
+
+                <div id="errorMessage" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded text-sm text-center"></div>
+                <div id="successMessage" class="hidden mb-4 p-3 bg-green-50 border border-green-200 text-green-600 rounded text-sm text-center"></div>
+
+                <div class="space-y-2">
+                    <input
+                        type="email"
+                        id="loginEmail"
+                        placeholder="Email"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                    />
+                    <input
+                        type="password"
+                        id="loginPassword"
+                        placeholder="Password"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                    />
+                    <button
+                        id="loginBtn"
+                        class="w-full btn-gradient text-white py-2 rounded font-semibold text-sm transition-all"
+                    >
+                        Log in
+                    </button>
+                </div>
+
+                <div class="flex items-center my-5">
+                    <div class="flex-1 border-t border-gray-300"></div>
+                    <span class="px-4 text-sm text-gray-500 font-semibold">OR</span>
+                    <div class="flex-1 border-t border-gray-300"></div>
+                </div>
+
+                <button
+                    id="forgotPasswordBtn"
+                    class="w-full text-xs text-blue-900 hover:text-blue-700 font-normal"
+                >
+                    Forgot password?
+                </button>
+            </div>
+
+            <div class="bg-white rounded-lg shadow-2xl p-6 text-center">
+                <p class="text-sm">
+                    Don't have an account? 
+                    <button id="switchToRegister" class="text-blue-500 font-semibold hover:text-blue-700">
+                        Sign up
+                    </button>
+                </p>
+            </div>
+
+            <div class="text-center text-white text-xs mt-6 px-4">
+                <p class="mb-2">@students.duet.edu.pk only</p>
+            </div>
+        </div>
+
+        <!-- Register Section -->
+        <div id="registerSection" class="hidden space-y-3">
+            <div class="bg-white rounded-lg shadow-2xl p-10">
+                <div class="text-center mb-6">
+                    <h1 class="text-5xl font-bold logo-gradient mb-3">DUETgram</h1>
+                    <p class="text-gray-500 font-semibold text-base px-8">Sign up to connect with your DUET community</p>
+                </div>
+
+                <div id="errorMessageReg" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded text-sm text-center"></div>
+                <div id="successMessageReg" class="hidden mb-4 p-3 bg-green-50 border border-green-200 text-green-600 rounded text-sm text-center"></div>
+
+                <div class="space-y-2">
+                    <input
+                        type="email"
+                        id="registerEmail"
+                        placeholder="Email"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                    />
+                    <div class="text-xs text-gray-500 bg-blue-50 p-3 rounded">
+                        📧 You'll receive a verification email. After verification, create your password.
+                    </div>
+                    <button
+                        id="registerBtn"
+                        class="w-full btn-gradient text-white py-2 rounded font-semibold text-sm transition-all"
+                    >
+                        Sign up
+                    </button>
+                </div>
+
+                <p class="text-xs text-gray-500 text-center mt-4 px-4 leading-relaxed">
+                    By signing up, you agree to our Terms and Data Policy.
+                </p>
+            </div>
+
+            <div class="bg-white rounded-lg shadow-2xl p-6 text-center">
+                <p class="text-sm">
+                    Have an account? 
+                    <button id="switchToLogin" class="text-blue-500 font-semibold hover:text-blue-700">
+                        Log in
+                    </button>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Verification Screen -->
+    <div id="verificationScreen" class="hidden w-full max-w-sm">
+        <div class="bg-white rounded-lg shadow-2xl p-8">
+            <div class="text-center mb-6">
+                <div class="w-24 h-24 mx-auto mb-4 rounded-full border-4 border-gray-900 flex items-center justify-center">
+                    <svg class="w-12 h-12 text-gray-900" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
+                    </svg>
+                </div>
+                <h2 class="text-xl font-semibold text-gray-900 mb-2">Verify Your Email</h2>
+                <p class="text-sm text-gray-500 mb-1">We sent a verification link to</p>
+                <p class="text-sm font-semibold text-gray-900" id="verificationEmail"></p>
+            </div>
+
+            <div id="errorMessageVerify" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded text-sm text-center"></div>
+            <div id="successMessageVerify" class="hidden mb-4 p-3 bg-green-50 border border-green-200 text-green-600 rounded text-sm text-center"></div>
+
+            <div class="space-y-3">
+                <button
+                    id="checkVerificationBtn"
+                    class="w-full btn-gradient text-white py-2 rounded font-semibold text-sm transition-all"
+                >
+                    I've Verified My Email
+                </button>
+
+                <button
+                    id="resendVerificationBtn"
+                    class="w-full text-sm text-blue-500 hover:text-blue-700 font-semibold"
+                >
+                    Resend Email
+                </button>
+
+                <button
+                    id="logoutBtnVerify"
+                    class="w-full text-sm text-gray-500 hover:text-gray-700"
+                >
+                    Back to Login
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Screen -->
+    <div id="dashboardScreen" class="hidden w-full max-w-2xl">
+        <div class="bg-white rounded-lg shadow-2xl overflow-hidden">
+            <!-- Header -->
+            <div class="border-b border-gray-200 p-4 bg-gradient-to-r from-purple-50 to-pink-50">
+                <div class="flex items-center justify-between">
+                    <h1 class="text-3xl font-bold logo-gradient">DUETgram</h1>
+                    <button
+                        id="logoutBtnDash"
+                        class="text-sm text-gray-700 hover:text-gray-900 font-semibold px-4 py-2 rounded-lg hover:bg-white transition-all"
+                    >
+                        Log out
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tab Navigation -->
+            <div class="border-b border-gray-200 bg-white">
+                <div class="flex justify-around">
+                    <button id="profileTabBtn" class="tab-btn flex-1 py-4 text-sm font-medium border-b-2 border-gray-900">
+                        Profile
+                    </button>
+                    <button id="discoverTabBtn" class="tab-btn flex-1 py-4 text-sm font-medium text-gray-500">
+                        Discover
+                    </button>
+                    <button id="followersTabBtn" class="tab-btn flex-1 py-4 text-sm font-medium text-gray-500">
+                        Followers
+                    </button>
+                    <button id="followingTabBtn" class="tab-btn flex-1 py-4 text-sm font-medium text-gray-500">
+                        Following
+                    </button>
+                    <button id="messagesTabBtn" class="tab-btn flex-1 py-4 text-sm font-medium text-gray-500">
+                        Messages
+                    </button>
+                </div>
+            </div>
+
+            <!-- Profile Tab -->
+            <div id="profileTab" class="p-6">
+                <div class="flex items-center mb-6">
+                    <div class="w-20 h-20 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white text-2xl font-bold mr-4 shadow-lg">
+                        <span id="userInitial"></span>
+                    </div>
+                    <div>
+                        <h2 class="text-xl font-semibold text-gray-900" id="userName"></h2>
+                        <p class="text-sm text-gray-500" id="userEmail"></p>
+                        <p class="text-xs text-gray-400 mt-1">Joined <span id="joinDate"></span></p>
+                    </div>
+                </div>
+
+                <div id="errorMessageDash" class="hidden mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded text-sm text-center"></div>
+                <div id="successMessageDash" class="hidden mb-4 p-3 bg-green-50 border border-green-200 text-green-600 rounded text-sm text-center"></div>
+
+                <!-- Force Password Change -->
+                <div id="forcePasswordChange" class="hidden mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                    <p class="text-sm text-yellow-800 font-medium">🔒 Create your password to secure your account</p>
+                </div>
+
+                <!-- Normal Dashboard -->
+                <div id="normalDashboard">
+                    <div class="grid grid-cols-3 gap-4 mb-6 text-center">
+                        <div class="p-4 bg-gray-50 rounded-lg">
+                            <p class="text-xl font-semibold text-gray-900">0</p>
+                            <p class="text-xs text-gray-500">posts</p>
+                        </div>
+                        <div class="p-4 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onclick="document.getElementById('followersTabBtn').click()">
+                            <p class="text-xl font-semibold text-gray-900" id="followersCount">0</p>
+                            <p class="text-xs text-gray-500">followers</p>
+                        </div>
+                        <div class="p-4 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors" onclick="document.getElementById('followingTabBtn').click()">
+                            <p class="text-xl font-semibold text-gray-900" id="followingCount">0</p>
+                            <p class="text-xs text-gray-500">following</p>
+                        </div>
+                    </div>
+
+                    <button id="togglePasswordBtn" class="w-full py-2 text-sm font-semibold text-blue-500 hover:text-blue-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-all">
+                        Change Password
+                    </button>
+                </div>
+
+                <!-- Password Change Section -->
+                <div id="changePasswordSection" class="hidden space-y-3">
+                    <input
+                        type="password"
+                        id="newPassword"
+                        placeholder="New password (min 6 characters)"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                    />
+                    <input
+                        type="password"
+                        id="confirmPassword"
+                        placeholder="Confirm password"
+                        class="w-full px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                    />
+                    <button
+                        id="changePasswordBtn"
+                        class="w-full btn-gradient text-white py-2 rounded font-semibold text-sm transition-all"
+                    >
+                        Update Password
+                    </button>
+                </div>
+            </div>
+
+            <!-- Discover Tab -->
+            <div id="discoverTab" class="hidden">
+                <div class="p-4 bg-gradient-to-r from-purple-50 to-pink-50 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-900">Discover Students</h3>
+                    <p class="text-xs text-gray-500">Connect with your DUET community</p>
+                </div>
+                <div id="discoverContainer" class="max-h-96 overflow-y-auto"></div>
+            </div>
+
+            <!-- Followers Tab -->
+            <div id="followersTab" class="hidden">
+                <div class="p-4 bg-gradient-to-r from-purple-50 to-pink-50 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-900">Followers</h3>
+                    <p class="text-xs text-gray-500">People following you</p>
+                </div>
+                <div id="followersContainer" class="max-h-96 overflow-y-auto"></div>
+            </div>
+
+            <!-- Following Tab -->
+            <div id="followingTab" class="hidden">
+                <div class="p-4 bg-gradient-to-r from-purple-50 to-pink-50 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-900">Following</h3>
+                    <p class="text-xs text-gray-500">People you follow</p>
+                </div>
+                <div id="followingContainer" class="max-h-96 overflow-y-auto"></div>
+            </div>
+
+            <!-- Messages Tab -->
+            <div id="messagesTab" class="hidden">
+                <div class="p-4 bg-gradient-to-r from-purple-50 to-pink-50 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-900">Messages</h3>
+                    <p class="text-xs text-gray-500">Chat with your DUET community</p>
+                </div>
+                <div id="messagesContainer" class="max-h-96 overflow-y-auto">
+                    <!-- Conversations list -->
+                    <div id="conversationsList"></div>
+                    <!-- Chat view -->
+                    <div id="chatView" class="hidden">
+                        <div class="flex items-center justify-between p-4 border-b border-gray-200 bg-white">
+                            <button id="backToConversationsBtn" class="text-blue-500 hover:text-blue-700 font-semibold text-sm">
+                                ← Back
+                            </button>
+                            <div class="flex items-center">
+                                <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-400 via-pink-500 to-red-500 flex items-center justify-center text-white font-bold text-sm mr-2">
+                                    <span id="chatUserInitial"></span>
+                                </div>
+                                <span class="font-semibold text-gray-900" id="chatUserName"></span>
+                            </div>
+                        </div>
+                        <div id="messagesList" class="p-4 space-y-3 max-h-80 overflow-y-auto"></div>
+                        <div class="p-4 border-t border-gray-200 bg-white">
+                            <div class="flex space-x-2">
+                                <input
+                                    type="text"
+                                    id="messageInput"
+                                    placeholder="Type a message..."
+                                    class="flex-1 px-3 py-2 text-sm border border-gray-300 rounded bg-gray-50 focus:bg-white focus:outline-none focus:border-gray-400"
+                                />
+                                <button
+                                    id="sendMessageBtn"
+                                    class="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded font-semibold text-sm hover:from-purple-600 hover:to-pink-600 transition-all"
+                                >
+                                    Send
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        setTimeout(() => {
+            document.getElementById('loadingScreen').style.display = 'none';
+        }, 500);
+    </script>
+</body>
+</html>
